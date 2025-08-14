@@ -31,7 +31,7 @@
 
 ### 1) Get the code and assets
 ```bash
-git clone https://github.com/<you>/babykiosk.git
+git clone https://github.com/AlexanderGatesV2/babykiosk.git
 cd babykiosk
 
 # Create the emoji assets folder (add Twemoji PNGs later)
