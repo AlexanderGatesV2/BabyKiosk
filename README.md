@@ -115,7 +115,7 @@ If the folder is missing/empty, the app falls back to system fonts (color emoji 
   - X server **keyboard & pointer grabs**
   - X-level grabs on **Alt (Mod1)** and **Super (Mod4)**
   - GNOME: temporarily unbinds **Alt+Tab**, **Alt+`**, **Alt+Space**, **Super overlay**, **Win+1..9**
-  - `--nuclear` option sweeps common schemas and blanks most shortcuts while running
+  - `--nuclear` option sweeps common schemas and blanks most shortcuts while running **(RECOMMENDED)**
 - **Wayland:** the compositor owns global shortcuts; apps can’t fully block them. For kiosk-like behavior, run inside a kiosk compositor:
   ```bash
   cage -s -- python3 baby_kiosk.py
@@ -128,9 +128,9 @@ If the folder is missing/empty, the app falls back to system fonts (color emoji 
 ### Windows 10/11
 - Installs a low-level keyboard hook on a dedicated message-loop thread. Swallows:
   - **Win key** (and anything while Win is held)
-  - **Alt+Tab**, **Alt+Esc**, **Alt+F4**
-  - **Ctrl+Esc** (Start)
-  - **PrintScreen** (also disables Win11 “PrintScreen opens Snipping Tool” mapping during the session)
+  - **Alt+Tab**, **Alt+Esc**, **Alt+F4** 
+  - **Ctrl+Esc** (Start) (I ihad to disable it manually)
+  - **PrintScreen** (also disables Win11 “PrintScreen opens Snipping Tool” mapping during the session) **(Disable in Settings if it doesn't work)**
 - **Known un-blockables:** `Ctrl+Alt+Del`, `Win+L`, UAC secure desktop prompts.
 
 ---
@@ -168,9 +168,3 @@ PRs welcome for:
 
 ## Security & limits
 Desktop OSs reserve secure shortcuts by design. This app follows best-effort kiosk strategies but **cannot** block everything (e.g., `Ctrl+Alt+Del`, `Win+L`). For bullet-proof setups, combine with OS policies (Assigned Access, MDM, kiosk sessions).
-
----
-
-## License
-MIT (or choose your preferred license for the repo).
-```
