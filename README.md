@@ -23,7 +23,7 @@
   - **macOS:** full-screen + Twemoji images for reliable color emoji rendering.
   - **Windows:** low-level keyboard hook to swallow **Win**, **Alt+Tab**, **Ctrl+Esc**, **PrintScreen**, etc. (OS limits apply).
 - **Fun visuals:** confetti bursts; **large** letters/numbers; auto-scales to display resolution.
-- **Emoji on smash:** non-alphanumeric keys show random emoji (Twemoji)[https://github.com/twitter/twemoji].
+- **Emoji on smash:** non-alphanumeric keys show random emoji [Twemoji](https://github.com/twitter/twemoji).
 
 ---
 
