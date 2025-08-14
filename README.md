@@ -1,4 +1,3 @@
-```markdown
 # BabyKiosk
 *A TinyFingers/BabySmash-style full-screen keyboard-mashing game that toddlers can’t escape.*
 
