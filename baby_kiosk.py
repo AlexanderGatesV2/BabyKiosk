@@ -407,52 +407,51 @@ class GNOMEKeyBlocker:
 # On Windows, some global shortcuts (Ctrl+Alt+Del, Win+L) cannot be blocked by apps.
 # We install a low-level keyboard hook to swallow Win keys and common switchers
 # (Alt+Tab, Alt+Esc, Alt+F4, Win+D, Win+1..9) while the game is active.
-# --------------------------- Windows key blocker (best-effort) --------------------------- #
-# On Windows, some global shortcuts (Ctrl+Alt+Del, Win+L) cannot be blocked by apps.
-# We install a low-level keyboard hook on a dedicated thread with a message loop.
 if sys.platform.startswith('win'):
     import ctypes
     from ctypes import wintypes
-    import threading, winreg
+    import threading
+    import winreg
+    import threading
+    import winreg
 
     class WinKeyBlocker:
         WH_KEYBOARD_LL = 13
         WM_KEYDOWN = 0x0100
         WM_SYSKEYDOWN = 0x0104
-        WM_KEYUP = 0x0101
-        WM_SYSKEYUP = 0x0105
-
         VK_TAB = 0x09
         VK_ESCAPE = 0x1B
         VK_F4 = 0x73
         VK_LWIN = 0x5B
         VK_RWIN = 0x5C
         VK_D = 0x44
-        VK_SPACE = 0x20
-        VK_MENU = 0x12     # Alt
-        VK_CONTROL = 0x11
-        VK_SNAPSHOT = 0x2C # PrintScreen
+        # 0..9
         VK_0 = 0x30
         VK_1 = 0x31
         VK_9 = 0x39
+        VK_MENU = 0x12  # Alt
+        VK_CONTROL = 0x11
+        VK_SNAPSHOT = 0x2C  # PrintScreen
+        VK_SPACE = 0x20
+        WM_KEYUP = 0x0101
+        WM_SYSKEYUP = 0x0105
 
         class KBDLLHOOKSTRUCT(ctypes.Structure):
-            _fields_ = [
-                ("vkCode", wintypes.DWORD),
-                ("scanCode", wintypes.DWORD),
-                ("flags", wintypes.DWORD),
-                ("time", wintypes.DWORD),
-                ("dwExtraInfo", wintypes.ULONG),
-            ]
+            _fields_ = [("vkCode", wintypes.DWORD), ("scanCode", wintypes.DWORD),
+                        ("flags", wintypes.DWORD), ("time", wintypes.DWORD),
+                        ("dwExtraInfo", wintypes.ULONG)]
 
         def __init__(self):
             self.user32 = ctypes.windll.user32
             self.kernel32 = ctypes.windll.kernel32
             self.hook = None
-            self._CMPFUNC = ctypes.WINFUNCTYPE(
-                wintypes.LRESULT, wintypes.INT, wintypes.WPARAM, wintypes.LPARAM
-            )
+            self._CMPFUNC = ctypes.WINFUNCTYPE(wintypes.LRESULT, wintypes.INT, wintypes.WPARAM, wintypes.LPARAM)
             self._proc = self._CMPFUNC(self._low_level_proc)
+            # hook thread state
+            self.thread = None
+            self.thread_id = 0
+            self.stop_event = threading.Event()
+            self.prev_snip_toggle = None
             # hook thread state
             self.thread = None
             self.thread_id = 0
@@ -463,40 +462,32 @@ if sys.platform.startswith('win'):
             return (self.user32.GetAsyncKeyState(self.VK_MENU) & 0x8000) != 0
 
         def _win_down(self):
-            return (
-                (self.user32.GetAsyncKeyState(self.VK_LWIN) & 0x8000) != 0
-                or (self.user32.GetAsyncKeyState(self.VK_RWIN) & 0x8000) != 0
-            )
+            return (self.user32.GetAsyncKeyState(self.VK_LWIN) & 0x8000) != 0 or \
+                   (self.user32.GetAsyncKeyState(self.VK_RWIN) & 0x8000) != 0
 
         def _low_level_proc(self, nCode, wParam, lParam):
             if nCode == 0 and wParam in (self.WM_KEYDOWN, self.WM_SYSKEYDOWN, self.WM_KEYUP, self.WM_SYSKEYUP):
                 kb = ctypes.cast(lParam, ctypes.POINTER(self.KBDLLHOOKSTRUCT)).contents
                 vk = kb.vkCode
-
                 # Block PrintScreen / SnippingTool trigger
                 if vk == self.VK_SNAPSHOT:
                     return 1
-
                 # Block Ctrl+Esc (Start menu)
                 if (self.user32.GetAsyncKeyState(self.VK_CONTROL) & 0x8000) != 0 and vk == self.VK_ESCAPE:
                     return 1
-
-                # Always swallow the Win keys themselves
+                # Block Win keys outright
                 if vk in (self.VK_LWIN, self.VK_RWIN):
                     return 1
-
-                # While Win is held: swallow everything (Win+Tab/D/Space/1..9/0, etc.)
+                # Block Win+D and Win+1..9
                 if self._win_down():
                     return 1
-
                 # Block Alt+Tab / Alt+Esc / Alt+F4
                 if self._alt_down() and vk in (self.VK_TAB, self.VK_ESCAPE, self.VK_F4):
                     return 1
-
             return self.user32.CallNextHookEx(self.hook, nCode, wParam, lParam)
 
         def _message_loop(self):
-            # Minimal message loop required for WH_KEYBOARD_LL to be reliable
+            # Minimal message loop required for LL hooks
             msg = wintypes.MSG()
             while not self.stop_event.is_set():
                 res = self.user32.GetMessageW(ctypes.byref(msg), 0, 0, 0)
@@ -508,69 +499,18 @@ if sys.platform.startswith('win'):
         def install(self):
             if self.hook or (self.thread and self.thread.is_alive()):
                 return
-
-            # Turn off Win11 "PrintScreen opens Snipping Tool" for this session
+            # Turn off Win11 "PrintScreen opens Snipping Tool" toggle for this session
             try:
-                k = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
-                                   r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced",
-                                   0, winreg.KEY_READ)
-                self.prev_snip_toggle, _ = winreg.QueryValueEx(k, "PrintScreenKeyForSnippingEnabled")
-                winreg.CloseKey(k)
+                key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced", 0, winreg.KEY_READ)
+                self.prev_snip_toggle, _ = winreg.QueryValueEx(key, "PrintScreenKeyForSnippingEnabled")
+                winreg.CloseKey(key)
             except Exception:
                 self.prev_snip_toggle = None
             try:
-                k = winreg.CreateKey(winreg.HKEY_CURRENT_USER,
-                                     r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced")
-                winreg.SetValueEx(k, "PrintScreenKeyForSnippingEnabled", 0, winreg.REG_DWORD, 0)
-                winreg.CloseKey(k)
-            except Exception:
-                pass
-
-            self.stop_event.clear()
-
-            def _runner():
-                # Save OS thread id for clean shutdown
-                self.thread_id = self.kernel32.GetCurrentThreadId()
-                # Install global low-level keyboard hook (module handle 0 is OK for WH_KEYBOARD_LL)
-                self.hook = self.user32.SetWindowsHookExW(self.WH_KEYBOARD_LL, self._proc, 0, 0)
-                # Pump messages (required)
-                self._message_loop()
-                # Unhook on exit (thread side)
-                if self.hook:
-                    try:
-                        self.user32.UnhookWindowsHookEx(self.hook)
-                    except Exception:
-                        pass
-                    self.hook = None
-
-            self.thread = threading.Thread(target=_runner, name="WinKeyBlocker", daemon=True)
-            self.thread.start()
-
-        def uninstall(self):
-            # Restore Snipping Tool toggle
-            try:
-                k = winreg.CreateKey(winreg.HKEY_CURRENT_USER,
-                                     r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced")
-                if self.prev_snip_toggle is not None:
-                    winreg.SetValueEx(k, "PrintScreenKeyForSnippingEnabled", 0, winreg.REG_DWORD, int(self.prev_snip_toggle))
-                winreg.CloseKey(k)
-            except Exception:
-                pass
-
-            self.stop_event.set()
-            # Ask the hook thread's message loop to quit
-            try:
-                if self.thread_id:
-                    WM_QUIT = 0x0012
-                    self.user32.PostThreadMessageW(self.thread_id, WM_QUIT, 0, 0)
-            except Exception:
-                pass
-            try:
-                if self.thread:
-                    self.thread.join(timeout=1.0)
-            except Exception:
-                pass
-            # Extra safety unhook from main thread
+                key = winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced")
+                winreg.SetValueEx(key, "PrintScreenKeyForSnippingEnabled", 0, winreg.REG_DWORD, 0)
+                winreg.CloseKey(key)
+            except Excep
             if self.hook:
                 try:
                     self.user32.UnhookWindowsHookEx(self.hook)
@@ -647,7 +587,7 @@ class BabyKiosk:
                 pass
         except Exception:
             pass
-        pygame.display.set_caption("BabyKiosk — TinyFingers-style")
+        pygame.display.set_caption("BabyKiosk")
         pygame.mouse.set_visible(False)
         pygame.event.set_grab(True)  # pointer grab via SDL as extra belt
         try:
@@ -736,6 +676,19 @@ class BabyKiosk:
             except Exception:
                 self.sound = None
 
+        # --- Hold/continuous-spawn state (limits to avoid overload) ---
+        self.key_hold: dict[int, dict] = {}
+        self.hold_interval_alnum = 0.09   # ~11 per second per key
+        self.hold_interval_emoji = 0.09
+        self.max_glyphs = 180
+        self.max_particles = 800
+
+        # "Resting hand" detection: many simultaneous non-modifier keys => blank screen
+        self.rest_threshold = 4
+        self.rest_delay = 0.12  # seconds the threshold must be exceeded before blanking
+        self.resting = False
+        self._rest_timer = 0.0
+
     def _make_click_sound(self):
         # Generate a tiny click/bleep to reward keypresses
         import array
@@ -762,8 +715,17 @@ class BabyKiosk:
             color = [random.randint(60, 255) for _ in range(3)]
             life = random.uniform(0.6, 1.6)
             self.particles.append(Particle(x, y, vx, vy, r, life, tuple(color)))
+        if len(self.particles) > self.max_particles:
+            self.particles = self.particles[-self.max_particles:]
 
     def spawn_glyph(self, text: str, x: int, y: int, font: pygame.font.Font | None = None, fallback_font: pygame.font.Font | None = None, image: pygame.Surface | None = None):
+        color = [random.randint(100, 255) for _ in range(3)]
+        vx = random.uniform(-80, 80)
+        vy = random.uniform(-30, 30)
+        life = random.uniform(0.8, 1.6)
+        self.glyphs.append(FloatingGlyph(text, x, y, vx, vy, life, tuple(color), font or self.mid_font, fallback_font or self.mid_font, image))
+        if len(self.glyphs) > self.max_glyphs:
+            self.glyphs = self.glyphs[-self.max_glyphs:](self, text: str, x: int, y: int, font: pygame.font.Font | None = None, fallback_font: pygame.font.Font | None = None, image: pygame.Surface | None = None):
         color = [random.randint(100, 255) for _ in range(3)]
         vx = random.uniform(-80, 80)
         vy = random.uniform(-30, 30)
@@ -924,6 +886,43 @@ class BabyKiosk:
             if not active:
                 self._restore_fullscreen()
 
+            # Continuous spawns & resting-hand blanking
+            # Count non-modifier held keys
+            mod_keys = {
+                getattr(pygame, 'K_LSHIFT', 0), getattr(pygame, 'K_RSHIFT', 0),
+                getattr(pygame, 'K_LCTRL', 0),  getattr(pygame, 'K_RCTRL', 0),
+                getattr(pygame, 'K_LALT', 0),   getattr(pygame, 'K_RALT', 0),
+                getattr(pygame, 'K_LMETA', 0),  getattr(pygame, 'K_RMETA', 0),
+                getattr(pygame, 'K_LGUI', 0),   getattr(pygame, 'K_RGUI', 0),
+            }
+            nonmod_count = sum(1 for k in self.key_hold.keys() if k not in mod_keys)
+            if nonmod_count >= self.rest_threshold:
+                self._rest_timer += dt
+                if self._rest_timer >= self.rest_delay and not self.resting:
+                    self.resting = True
+                    self.particles.clear()
+                    self.glyphs.clear()
+            else:
+                self._rest_timer = 0.0
+                if self.resting:
+                    self.resting = False
+
+            # While keys are held, spawn glyphs at a limited rate (no overload)
+            if not self.escape.primed and not self.resting:
+                now = time.time()
+                for k, info in list(self.key_hold.items()):
+                    if now >= info.get('next', now):
+                        x = random.randint(40, self.w - 40)
+                        y = random.randint(40, self.h - 40)
+                        if info.get('is_alnum') and info.get('text'):
+                            self.spawn_glyph(info['text'], x, y, font=self.alpha_font, fallback_font=self.mid_font)
+                            info['next'] = now + self.hold_interval_alnum
+                        else:
+                            emoji = random.choice(EMOJIS)
+                            img = self._twemoji_surface(emoji, self.emoji_px) if self.twemoji_dir else None
+                            self.spawn_glyph(emoji, x, y, font=self.emoji_font, fallback_font=self.mid_font, image=img)
+                            info['next'] = now + self.hold_interval_emoji
+
             # Update screen size based on current display resolution
             self.w, self.h = self.screen.get_size()
             # Refresh font sizes if resolution changed
@@ -984,7 +983,15 @@ class BabyKiosk:
 
                     # Use alphanumeric glyphs when available; otherwise, show a fun emoji
                     ch = ev.unicode if hasattr(ev, 'unicode') else ''
-                    if ch and ch.isalnum():
+                    now = time.time()
+                    is_alnum = bool(ch and ch.isalnum())
+                    # Register hold state with a per-key spawn schedule
+                    self.key_hold[ev.key] = {
+                        'is_alnum': is_alnum,
+                        'text': ch.upper() if is_alnum else '',
+                        'next': now + (self.hold_interval_alnum if is_alnum else self.hold_interval_emoji),
+                    }
+                    if is_alnum:
                         self.spawn_glyph(ch.upper(), x, y, font=self.alpha_font, fallback_font=self.mid_font)
                     else:
                         emoji = random.choice(EMOJIS)
@@ -997,6 +1004,10 @@ class BabyKiosk:
                         except Exception:
                             pass
 
+                elif ev.type == pygame.KEYUP:
+                    # Clear hold state for released keys
+                    if ev.key in self.key_hold:
+                        self.key_hold.pop(ev.key, None)
                 elif ev.type == pygame.MOUSEMOTION or ev.type == pygame.MOUSEBUTTONDOWN:
                     # Keep cursor inside by constantly recentering (extra belt)
                     if not self.args.windowed:
@@ -1040,44 +1051,10 @@ def parse_args():
     ap.add_argument('--allow-super', action='store_true', help='Do NOT block the Super/Win modifier (default blocks on X11)')
     ap.add_argument('--emoji-font', help='Path to a TTF emoji-capable font (e.g., NotoColorEmoji.ttf)')
     ap.add_argument('--no-gnome-keyblock', action='store_true', help='Do not unbind GNOME Alt+Tab/Alt+` shortcuts')
-    ap.add_argument('--nuclear', action='store_true', help='Blank nearly all GNOME keybindings while the game runs (restored on exit)')
+    ap.add_argument('--nuclear', dest='nuclear', action='store_true', default=True, help='Blank nearly all GNOME keybindings while the game runs (default: ON)')
+    ap.add_argument('--no-nuclear', dest='nuclear', action='store_false', help='Disable the GNOME nuclear keybinding sweep for this run')
     ap.add_argument('--no-win-keyblock', action='store_true', help='(Windows) Do not install the low-level keyboard hook')
     return ap.parse_args()
 
 
 def main():
-    # SDL/pygame behavior tweaks to reduce minimize/focus loss escapes
-    os.environ.setdefault('SDL_VIDEO_MINIMIZE_ON_FOCUS_LOSS', '0')
-    os.environ.setdefault('SDL_HINT_GRAB_KEYBOARD', '1')
-    pygame.init()
-    try:
-        game = BabyKiosk(parse_args())
-        # Ensure we ungrab on crash
-        def _cleanup():
-            try:
-                if getattr(game, 'gnome_blocker', None):
-                    game.gnome_blocker.disable()
-            except Exception:
-                pass
-            try:
-                if getattr(game, 'win_blocker', None):
-                    game.win_blocker.uninstall()
-            except Exception:
-                pass
-            try:
-                if game.locker:
-                    game.locker.unlock()
-            except Exception:
-                pass
-            try:
-                pygame.display.quit()
-            except Exception:
-                pass
-        atexit.register(_cleanup)
-        game.run()
-    finally:
-        pygame.quit()
-
-
-if __name__ == '__main__':
-    main()
