@@ -1,5 +1,5 @@
 # BabyKiosk
-*A TinyFingers/BabySmash-style full-screen keyboard-mashing game that toddlers can’t escape.*
+*A full-screen keyboard-mashing game that toddlers can’t escape.*
 
 > **TL;DR**
 > - Cross-platform: **Linux**, **macOS**, **Windows**
