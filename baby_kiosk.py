@@ -1178,7 +1178,7 @@ class BabyKiosk:
 def parse_args():
     ap = argparse.ArgumentParser(description="TinyFingers-style kiosk game for babies")
     ap.add_argument('--escape-code', default='GROWNUP', help='Secret word to exit after priming (default: GROWNUP)')
-    ap.add_argument('--no-sound', action='store_true', help='Disable key click sounds')
+    ap.add_argument('--no-sound', action='store_true', default=True, help='Disable key click sounds')
     ap.add_argument('--windowed', action='store_true', help='Run in a window (no X11 lock/grab)')
     ap.add_argument('--allow-alt', action='store_true', help='Do NOT block the Alt modifier (default blocks Alt on X11)')
     ap.add_argument('--allow-super', action='store_true', help='Do NOT block the Super/Win modifier (default blocks on X11)')
@@ -1187,7 +1187,7 @@ def parse_args():
     ap.add_argument('--nuclear', dest='nuclear', action='store_true', default=True, help='Blank nearly all GNOME keybindings while the game runs (default: ON)')
     ap.add_argument('--no-nuclear', dest='nuclear', action='store_false', help='Disable the GNOME nuclear keybinding sweep for this run')
     ap.add_argument('--no-win-keyblock', action='store_true', help='(Windows) Do not install the low-level keyboard hook')
-    ap.add_argument('--bg', help='Path to a background video file (default: assets/background/stars.mp4)')
+    ap.add_argument('--bg', default=True, help='Path to a background video file (default: assets/background/stars.mp4)')
     ap.add_argument('--no-bg', action='store_true', help='Disable background animation')
 
     return ap.parse_args()
