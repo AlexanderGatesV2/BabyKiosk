@@ -23,7 +23,7 @@ brew install --cask font-noto-color-emoji || true
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -U pip wheel
-python -m pip install pygame
+python -m pip install pygame python-xlib numpy opencv-python imageio
 
 # Ensure assets folder exists
 mkdir -p assets/72x72

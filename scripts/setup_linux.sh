@@ -20,7 +20,7 @@ fi
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -U pip wheel
-python -m pip install pygame python-xlib
+python -m pip install pygame python-xlib numpy opencv-python imageio
 
 # Ensure assets folder exists (we hardcode ./assets/72x72 in the app)
 mkdir -p assets/72x72

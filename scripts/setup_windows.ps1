@@ -27,7 +27,7 @@ if (-not (Test-Path .\.venv\Scripts\Activate.ps1)) { & $py -m venv .venv }
 
 # deps
 & .\.venv\Scripts\python -m pip install -U pip wheel
-& .\.venv\Scripts\python -m pip install pygame
+& .\.venv\Scripts\python -m pip install pygame python-xlib numpy opencv-python imageio
 
 # assets folder
 New-Item -ItemType Directory -Force -Path "$scriptDir\assets\72x72" | Out-Null
