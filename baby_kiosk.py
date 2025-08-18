@@ -36,21 +36,86 @@ Options
 
 """
 
+# -*- coding: utf-8 -*-
 from __future__ import annotations
-import pygame
-import os, time, math, random
-import argparse
-import atexit
-import math
+
+# --- stdlib ---------------------------------------------------------------
 import os
-import random
 import sys
 import time
+import math
+import random
+import ctypes
+import threading
+import atexit
+import shutil
+import subprocess
+import argparse
 from dataclasses import dataclass
-import cv2
-import numpy as np
-import imageio.v2 as imageio  # fallback decoder
-import imageio_ffmpeg
+
+# --- third-party: pygame --------------------------------------------------
+import pygame  # pip install pygame
+
+# --- optional video decoders (OpenCV preferred; ImageIO as fallback) -----
+try:
+    import cv2  # pip install opencv-python   (NOT the headless build)
+except Exception:
+    cv2 = None
+
+try:
+    import numpy as np  # pip install numpy (pulled in by opencv-python)
+except Exception:
+    np = None
+
+# ImageIO + ffmpeg fallback. Works cross-platform.
+try:
+    import imageio.v2 as imageio  # pip install imageio
+    try:
+        import imageio_ffmpeg  # pip install imageio-ffmpeg
+    except Exception:
+        imageio_ffmpeg = None
+
+    # If the plugin isn’t installed but a system ffmpeg exists, point ImageIO to it.
+    if imageio is not None and imageio_ffmpeg is None:
+        ffmpeg_exe = shutil.which("ffmpeg")
+        if ffmpeg_exe:
+            os.environ.setdefault("IMAGEIO_FFMPEG_EXE", ffmpeg_exe)
+except Exception:
+    imageio = None
+    imageio_ffmpeg = None
+
+# --- platform-specific bits ----------------------------------------------
+# X11 helpers (Linux/BSD). Import guarded so macOS/Windows won’t break.
+_X11_OK = False
+if sys.platform.startswith(("linux", "freebsd")):
+    try:
+        # python-xlib
+        from Xlib import X, display, XK  # type: ignore
+        _X11_OK = True
+    except Exception:
+        _X11_OK = False
+
+# Windows low-level keyboard hook (ctypes + type-stub-safe aliases)
+if sys.platform.startswith("win"):
+    import winreg  # type: ignore
+    from ctypes import wintypes
+
+    # Stub-safe fallbacks for editors where wintypes.pyi lacks these
+    LRESULT = getattr(wintypes, "LRESULT", ctypes.c_long)
+    WPARAM  = getattr(wintypes, "WPARAM",  ctypes.c_size_t)
+    LPARAM  = getattr(wintypes, "LPARAM",  ctypes.c_ssize_t)
+    INT     = ctypes.c_int
+    if hasattr(wintypes, "ULONG_PTR"):
+        ULONG_PTR = wintypes.ULONG_PTR
+    else:
+        ULONG_PTR = ctypes.c_ulonglong if ctypes.sizeof(ctypes.c_void_p) == 8 else ctypes.c_uint
+else:
+    winreg = None
+    LRESULT = WPARAM = LPARAM = INT = ULONG_PTR = None
+
+# --- app-wide constants ---------------------------------------------------
+SUPPORTED_BG_EXTS = (".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm", ".gif")
+
 
 # --------------------------- Emoji support --------------------------- #
 # A cheerful set of emojis to use when a non‑alphanumeric key is pressed.
@@ -96,17 +161,9 @@ def find_emoji_font() -> str | None:
             return p
     return None
 
-# Optional X11 grab support
-_X11_OK = False
-try:
-    from Xlib import X, display
-    _X11_OK = True
-except Exception:
-    _X11_OK = False
+
 
 # --------------------------- Visual helpers --------------------------- #
-
-# --- helpers ---------------------------------------------------------------
 def _resolve_bg_path(args, script_dir):
     """Return a valid background video path or None. Never returns a bool.
     If --bg is provided and exists, use it. Otherwise scan assets/background/
@@ -280,7 +337,7 @@ class BackgroundVideo(BackgroundBase):
         if (rgb.shape[1], rgb.shape[0]) != (self.w, self.h):
             rgb = cv2.resize(rgb, (self.w, self.h), interpolation=cv2.INTER_LINEAR)
         arr = np.ascontiguousarray(rgb)
-        surf = pygame.image.frombuffer(rgb.tobytes(), (self.w, self.h), "RGB")
+        surf = pygame.image.frombuffer(arr.data, (self.w, self.h), "RGB")
         return surf.convert()
 
     def _next_imageio(self):
@@ -338,8 +395,7 @@ class BackgroundVideo(BackgroundBase):
                 return pygame.transform.smoothscale(surf, (self.w, self.h))
 
         # Create surface from bytes (width, height)
-        w, h = frame.shape[1], frame.shape[0]
-        surf = pygame.image.frombuffer(frame.tobytes(), (w, h), "RGB")
+        surf = pygame.image.frombuffer(frame.tobytes(), (frame.shape[1], frame.shape[0]), "RGB")
         return surf.convert()
 
     def update(self, dt):
@@ -1092,16 +1148,16 @@ class BabyKiosk:
         # Opening splash
         self.screen.fill((0, 0, 0))
         title = self.big_font.render("SMASH!", True, (255, 255, 255))
-        self.screen.blit(title, title.get_rect(center=(self.w // 2, self.h // 2)))
+        self.screen.blit(title, title.get_rect(center=(self.w//2, self.h//2)))
         hint = self.small_font.render("(Hold BOTH Shift + press F12 to enter escape)", True, (200, 200, 200))
-        self.screen.blit(hint, hint.get_rect(center=(self.w // 2, self.h // 2 + 120)))
+        self.screen.blit(hint, hint.get_rect(center=(self.w//2, self.h//2 + 120)))
         pygame.display.flip()
         pygame.time.delay(800)
 
         while running:
             dt = clock.tick(60) / 1000.0
 
-            # If focus was lost/minimized, force restore
+            # If focus was lost/minimized (e.g., by WM on PrintScreen or Alt-Tab), force restore
             try:
                 active = pygame.display.get_active()
             except Exception:
@@ -1109,63 +1165,108 @@ class BabyKiosk:
             if not active:
                 self._restore_fullscreen()
 
-            # Maintain X11 grabs (heartbeat)
-            tnow = time.time()
-            if self.locker and (tnow - last_regrab) > 1.0:
-                self.locker.heartbeat()
-                last_regrab = tnow
+            # Continuous spawns & resting-hand blanking
+            # Count non-modifier held keys
+            mod_keys = {
+                getattr(pygame, 'K_LSHIFT', 0), getattr(pygame, 'K_RSHIFT', 0),
+                getattr(pygame, 'K_LCTRL', 0),  getattr(pygame, 'K_RCTRL', 0),
+                getattr(pygame, 'K_LALT', 0),   getattr(pygame, 'K_RALT', 0),
+                getattr(pygame, 'K_LMETA', 0),  getattr(pygame, 'K_RMETA', 0),
+                getattr(pygame, 'K_LGUI', 0),   getattr(pygame, 'K_RGUI', 0),
+            }
+            nonmod_count = sum(1 for k in self.key_hold.keys() if k not in mod_keys)
+            if nonmod_count >= self.rest_threshold:
+                self._rest_timer += dt
+                if self._rest_timer >= self.rest_delay and not self.resting:
+                    self.resting = True
+                    self.particles.clear()
+                    self.glyphs.clear()
+            else:
+                self._rest_timer = 0.0
+                if self.resting:
+                    self.resting = False
 
-            # --- events ---
+            # While keys are held, spawn glyphs at a limited rate (no overload)
+            if not self.escape.primed and not self.resting:
+                now = time.time()
+                for k, info in list(self.key_hold.items()):
+                    if now >= info.get('next', now):
+                        x = random.randint(40, self.w - 40)
+                        y = random.randint(40, self.h - 40)
+                        if info.get('is_alnum') and info.get('text'):
+                            self.spawn_glyph(info['text'], x, y, font=self.alpha_font, fallback_font=self.mid_font)
+                            info['next'] = now + self.hold_interval_alnum
+                        else:
+                            emoji = random.choice(EMOJIS)
+                            img = self._twemoji_surface(emoji, self.emoji_px) if self.twemoji_dir else None
+                            self.spawn_glyph(emoji, x, y, font=self.emoji_font, fallback_font=self.mid_font, image=img)
+                            info['next'] = now + self.hold_interval_emoji
+
+            # Update screen size based on current display resolution
+            self.w, self.h = self.screen.get_size()
+            # Refresh font sizes if resolution changed
+            self._refresh_fonts()
+            if self.background:
+                self.background.resize((self.w, self.h))
+
+            # Maintain X11 grabs
+            t = time.time()
+            if self.locker and (t - last_regrab) > 1.0:
+                self.locker.heartbeat()
+                last_regrab = t
+
             for ev in pygame.event.get():
                 if ev.type == pygame.QUIT:
+                    # Ignore window manager close while locked
                     if self.escape.primed:
                         running = False
-
                 elif ev.type == pygame.KEYDOWN:
                     mods = pygame.key.get_mods()
 
-                    # Ignore PrintScreen/SysRq
+                    # Ignore PrintScreen/SysRq to avoid WM screenshot hooks/minimize
                     _kps = [getattr(pygame, 'K_PRINTSCREEN', None), getattr(pygame, 'K_SYSREQ', None)]
                     if ev.key in [k for k in _kps if k is not None]:
                         continue
 
-                    # Block Alt combos
+                    # Swallow any key events that involve Alt (per QA request)
                     if self.block_alt:
                         alt_mask = (pygame.KMOD_LALT | pygame.KMOD_RALT | pygame.KMOD_ALT)
-                        if (pygame.key.get_mods() & alt_mask) or ev.key in (getattr(pygame, 'K_LALT', 0),
-                                                                            getattr(pygame, 'K_RALT', 0)):
+                        if (pygame.key.get_mods() & alt_mask) or ev.key in (getattr(pygame, 'K_LALT', 0), getattr(pygame, 'K_RALT', 0)):
                             continue
 
-                    # Block Super/Win combos
+                    # Swallow any key events that involve Super/Win key (blocks Win+Number dock shortcuts)
                     if self.block_super:
-                        gui_mask = getattr(pygame, 'KMOD_GUI', 0) | getattr(pygame, 'KMOD_LGUI', 0) | getattr(pygame,
-                                                                                                              'KMOD_RGUI',
-                                                                                                              0)
+                        gui_mask = getattr(pygame, 'KMOD_GUI', 0) | getattr(pygame, 'KMOD_LGUI', 0) | getattr(pygame, 'KMOD_RGUI', 0)
                         if pygame.key.get_mods() & gui_mask:
                             continue
                         if ev.key in (
-                                getattr(pygame, 'K_LSUPER', 0), getattr(pygame, 'K_RSUPER', 0),
-                                getattr(pygame, 'K_LMETA', 0), getattr(pygame, 'K_RMETA', 0),
-                                getattr(pygame, 'K_LGUI', 0), getattr(pygame, 'K_RGUI', 0),
+                            getattr(pygame, 'K_LSUPER', 0), getattr(pygame, 'K_RSUPER', 0),
+                            getattr(pygame, 'K_LMETA', 0), getattr(pygame, 'K_RMETA', 0),
+                            getattr(pygame, 'K_LGUI', 0), getattr(pygame, 'K_RGUI', 0),
                         ):
                             continue
 
-                    # Escape mode
+                    # Attempt to enter escape mode
                     if self.escape.try_prime(mods, ev.key):
                         continue
+
+                    # If already in escape mode, feed keystrokes
                     if self.escape.primed:
                         if self.escape.feed(ev):
                             running = False
                         continue
 
-                    # Regular play: burst + glyph/emoji
+                    # Regular play: spawn effects
+                    # Spawn effects at a random on-screen position (not the mouse center)
                     x = random.randint(40, self.w - 40)
                     y = random.randint(40, self.h - 40)
                     self.spawn_burst(x, y)
 
+                    # Use alphanumeric glyphs when available; otherwise, show a fun emoji
                     ch = ev.unicode if hasattr(ev, 'unicode') else ''
                     now = time.time()
                     is_alnum = bool(ch and ch.isalnum())
+                    # Register hold state with a per-key spawn schedule
                     self.key_hold[ev.key] = {
                         'is_alnum': is_alnum,
                         'text': ch.upper() if is_alnum else '',
@@ -1185,89 +1286,45 @@ class BabyKiosk:
                             pass
 
                 elif ev.type == pygame.KEYUP:
-                    self.key_hold.pop(ev.key, None)
-
-                elif ev.type in (pygame.MOUSEMOTION, pygame.MOUSEBUTTONDOWN):
+                    # Clear hold state for released keys
+                    if ev.key in self.key_hold:
+                        self.key_hold.pop(ev.key, None)
+                elif ev.type == pygame.MOUSEMOTION or ev.type == pygame.MOUSEBUTTONDOWN:
+                    # Keep cursor inside by constantly recentering (extra belt)
                     if not self.args.windowed:
-                        pygame.mouse.set_pos(self.w // 2, self.h // 2)
+                        pygame.mouse.set_pos(self.w//2, self.h//2)
 
-            # --- continuous spawns & resting-hand blanking ---
-            mod_keys = {
-                getattr(pygame, 'K_LSHIFT', 0), getattr(pygame, 'K_RSHIFT', 0),
-                getattr(pygame, 'K_LCTRL', 0), getattr(pygame, 'K_RCTRL', 0),
-                getattr(pygame, 'K_LALT', 0), getattr(pygame, 'K_RALT', 0),
-                getattr(pygame, 'K_LMETA', 0), getattr(pygame, 'K_RMETA', 0),
-                getattr(pygame, 'K_LGUI', 0), getattr(pygame, 'K_RGUI', 0),
-            }
-            nonmod_count = sum(1 for k in self.key_hold.keys() if k not in mod_keys)
-            if nonmod_count >= self.rest_threshold:
-                self._rest_timer += dt
-                if self._rest_timer >= self.rest_delay and not self.resting:
-                    self.resting = True
-                    self.particles.clear()
-                    self.glyphs.clear()
-            else:
-                self._rest_timer = 0.0
-                if self.resting:
-                    self.resting = False
-
-            if not self.escape.primed and not self.resting:
-                now = time.time()
-                for k, info in list(self.key_hold.items()):
-                    if now >= info.get('next', now):
-                        x = random.randint(40, self.w - 40)
-                        y = random.randint(40, self.h - 40)
-                        if info.get('is_alnum') and info.get('text'):
-                            self.spawn_glyph(info['text'], x, y, font=self.alpha_font, fallback_font=self.mid_font)
-                            info['next'] = now + self.hold_interval_alnum
-                        else:
-                            emoji = random.choice(EMOJIS)
-                            img = self._twemoji_surface(emoji, self.emoji_px) if self.twemoji_dir else None
-                            self.spawn_glyph(emoji, x, y, font=self.emoji_font, fallback_font=self.mid_font, image=img)
-                            info['next'] = now + self.hold_interval_emoji
-
-            # --- handle resize (fonts + background) ---
-            self.w, self.h = self.screen.get_size()
-            self._refresh_fonts()
-            if self.background:
-                self.background.resize((self.w, self.h))
-
-            # --- update game objects ---
+            # Update
             self.particles = [p for p in self.particles if p.life > 0 and p.r > 0]
             for p in self.particles:
                 p.update(dt)
             self.glyphs = [g for g in self.glyphs if g.life > 0]
             for g in self.glyphs:
                 g.update(dt)
-
+                
+            # per-frame updates
             if self.background:
                 self.background.update(dt)
-
-            # --- DRAW (ORDER MATTERS) ---
-            if self.resting:
-                # force blank screen while resting-hand is detected
-                self.screen.fill((0, 0, 0))
+            
+            # draw
+            if self.background:
+                self.background.draw(self.screen)
             else:
-                if self.background:
-                    self.background.draw(self.screen)
-                else:
-                    self.screen.fill((0, 0, 0))
+                self.screen.fill((0, 0, 0))  # only fill if no video bg
 
-                # then game layers
-                for p in self.particles:
-                    p.draw(self.screen)
-                for g in self.glyphs:
-                    g.draw(self.screen)
+            # Draw background and content
+            self.screen.fill((0, 0, 0))
+            for p in self.particles:
+                p.draw(self.screen)
+            for g in self.glyphs:
+                g.draw(self.screen)
 
-                # overlays last
-                self.draw_wayland_warning()
-                if self.escape.primed:
-                    self.draw_escape_overlay()
+            # Wayland warning if applicable
+            self.draw_wayland_warning()
 
-                # optional background status (debug)
-                # if self.background and getattr(self.background, 'status', ''):
-                #     t = self.small_font.render(self.background.status, True, (200, 200, 220))
-                #     self.screen.blit(t, (10, self.h - t.get_height() - 10))
+            # Escape overlay
+            if self.escape.primed:
+                self.draw_escape_overlay()
 
             pygame.display.flip()
 

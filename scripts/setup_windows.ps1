@@ -1,58 +1,52 @@
-#requires -Version 5
-param([string]$AppPath)
-$ErrorActionPreference = "Stop"
+Param(
+  [string]$AppPath = "baby_kiosk.py"
+)
 
-# project root (scripts\..)
-$scriptDir = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
-Set-Location $scriptDir
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
 
-# find app file
-if (-not $AppPath) {
-  $cand = Get-ChildItem -Name "baby_kiosk*.py" | Select-Object -First 1
-  if ($cand) { $AppPath = $cand } else { throw "Cannot find baby_kiosk.py; pass -AppPath <file.py>." }
+# Repo root (assumes this file lives in scripts\)
+$SCRIPT_DIR = Split-Path -Parent $MyInvocation.MyCommand.Path
+$ROOT = Split-Path -Parent $SCRIPT_DIR
+Set-Location $ROOT
+
+if (-not (Test-Path $AppPath)) {
+  $cand = Get-ChildItem -File -Name "baby_kiosk*.py" | Select-Object -First 1
+  if ($null -ne $cand) { $AppPath = $cand }
+}
+if (-not (Test-Path $AppPath)) {
+  Write-Error "Cannot find baby_kiosk.py. Pass -AppPath path to the script."
 }
 
-# find Python
-$py = $null
-try { $py = (Get-Command py -ErrorAction Stop).Source } catch {}
-if (-not $py) { try { $py = (Get-Command python -ErrorAction Stop).Source } catch {} }
-if (-not $py) {
-  Write-Host "Python 3 not found. Install from https://www.python.org/downloads/windows/ or Microsoft Store." -ForegroundColor Yellow
-  exit 1
-}
+# Select Python
+$python = ""
+try { $python = (& py -3 -c "import sys; print(sys.executable)") 2>$null } catch {}
+if (-not $python) { try { $python = (& python -c "import sys; print(sys.executable)") } catch {} }
+if (-not $python) { Write-Error "Python 3 not found. Install from python.org or Microsoft Store." }
 
 # venv
-& $py -3 -m venv .venv 2>$null | Out-Null
-if (-not (Test-Path .\.venv\Scripts\Activate.ps1)) { & $py -m venv .venv }
+& $python -m venv .venv
+$venvPy = Join-Path $PWD ".venv\Scripts\python.exe"
 
-# deps
-& .\.venv\Scripts\python -m pip install -U pip wheel
-& .\.venv\Scripts\python -m pip install pygame python-xlib numpy opencv-python imageio
+# pip & deps
+& $venvPy -m pip install -U pip wheel
+try { & $venvPy -m pip uninstall -y opencv-python-headless } catch {}
+& $venvPy -m pip install pygame numpy opencv-python imageio imageio-ffmpeg
 
-# assets folder
-New-Item -ItemType Directory -Force -Path "$scriptDir\assets\72x72" | Out-Null
+# Assets
+New-Item -ItemType Directory -Force -Path (Join-Path $PWD "assets\72x72") | Out-Null
+New-Item -ItemType Directory -Force -Path (Join-Path $PWD "assets\background") | Out-Null
 
-# runner
-$run = @'
-param([Parameter(ValueFromRemainingArguments=$true)][string[]]$Args)
-$ErrorActionPreference = "Stop"
-$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-& "$scriptDir\.venv\Scripts\Activate.ps1"
-$env:SDL_VIDEO_MINIMIZE_ON_FOCUS_LOSS = "0"
-$env:SDL_HINT_GRAB_KEYBOARD = "1"
-& "$scriptDir\.venv\Scripts\python.exe" "$scriptDir\APP_PLACEHOLDER" @Args
-'@
-$run = $run -replace 'APP_PLACEHOLDER', [Regex]::Escape($AppPath)
-Set-Content -Path "$scriptDir\run_baby_kiosk.ps1" -Value $run -Encoding UTF8
+# Runner
+$runPs1 = @"
+Param([Parameter(ValueFromRemainingArguments = $true)][string[]]`$ArgsPassthru)
+`$ErrorActionPreference = 'Stop'
+`$Root = Split-Path -Parent `$MyInvocation.MyCommand.Path
+& "`$Root\.venv\Scripts\python.exe" "`$Root\APP_PLACEHOLDER" @ArgsPassthru
+"@
+$runPath = Join-Path $PWD "run_baby_kiosk.ps1"
+$runPs1 = $runPs1 -replace "APP_PLACEHOLDER", [Regex]::Escape($AppPath)
+Set-Content -Path $runPath -Value $runPs1 -Encoding UTF8
 
-# desktop shortcut
-$ws = New-Object -ComObject WScript.Shell
-$lnk = "$([Environment]::GetFolderPath('Desktop'))\Baby Kiosk.lnk"
-$sc = $ws.CreateShortcut($lnk)
-$sc.TargetPath = "powershell.exe"
-$sc.Arguments = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$scriptDir\run_baby_kiosk.ps1`""
-$sc.WorkingDirectory = $scriptDir
-$sc.IconLocation = "$env:SystemRoot\System32\shell32.dll,167"
-$sc.Save()
-
-Write-Host "`n✅ Windows setup complete. Use the 'Baby Kiosk' desktop shortcut." -ForegroundColor Green
+Write-Host "✅ Windows setup complete."
+Write-Host "Run: powershell -ExecutionPolicy Bypass -File .\run_baby_kiosk.ps1"
