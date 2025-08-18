@@ -1,12 +1,14 @@
 # BabyKiosk
 *A full-screen keyboard-mashing game that toddlers can’t escape.*
 
-> **TL;DR**
+> **Highlights**
 > - Cross-platform: **Linux**, **macOS**, **Windows**
-> - True full-screen, pointer + keyboard grabs (best on X11)
-> - Big colorful letters/numbers + confetti
-> - Emojis via bundled **Twemoji PNGs** in `./assets/72x72/`
-> - Adult-only exit: **Hold both Shift** → **press F12** → type secret (default **`GROWNUP`**) → **Enter**
+> - True full-screen, pointer + keyboard grabs (strongest on **X11**)
+> - Big, scalable letters/numbers + confetti
+> - **Emojis** from local **Twemoji PNGs** in `./assets/72x72/`
+> - **Video background** from any file in `./assets/background/` (auto-discovery), with OpenCV/imageio fallback
+> - **Adult exit:** hold **both Shift** → press **F12** → type secret (default **`GROWNUP`**) → **Enter**
+> - **Nuclear mode ON by default** (temporarily blanks most GNOME shortcuts on X11)
 
 ---
 
@@ -24,6 +26,24 @@
   - **Windows:** low-level keyboard hook to swallow **Win**, **Alt+Tab**, **Ctrl+Esc**, **PrintScreen**, etc. (OS limits apply).
 - **Fun visuals:** confetti bursts; **large** letters/numbers; auto-scales to display resolution.
 - **Emoji on smash:** non-alphanumeric keys show random emoji [Twemoji](https://github.com/twitter/twemoji).
+- **Moving background:** The app now **auto-discovers any video** in `assets/background/` (e.g., `.mp4`, `.mov`, `.m4v`, `.avi`, `.mkv`, `.webm`, `.gif`). Use `--bg` to pick a specific file.
+- **Hold-to-repeat:** Holding an **alphanumeric** key continuously shows that glyph. Holding a **non-alphanumeric** key continuously shows emojis. Rate-limited + global caps prevent overload.
+- **Resting-hand blanking:** If **≥ 4 non-modifier** keys are held for ~0.12s, the screen clears until fewer keys are down.
+
+---
+
+## Project layout (assets)
+```
+babykiosk/
+  baby_kiosk.py            # or baby_kiosk_v18.py
+  assets/
+    72x72/                 # Twemoji PNGs (e.g., 1f389.png for 🎉)
+    background/            # Put one or more videos here (the app picks one automatically)
+  scripts/
+    setup_linux.sh
+    setup_macos.sh
+    setup_windows.ps1
+```
 
 ---
 
@@ -65,25 +85,19 @@ python3 baby_kiosk.py
 
 **Useful flags:**
 ```bash
-python3 baby_kiosk.py \
-  --escape-code=MYSECRET \
-  --no-sound \
-  --windowed \
-  --allow-alt \
-  --allow-super \
-  --no-gnome-keyblock \
-  --nuclear \
-  --no-win-keyblock
+python3 baby_kiosk.py   --escape-code=MYSECRET   --no-sound   --windowed   --allow-alt   --allow-super   --no-gnome-keyblock   --no-nuclear   --no-win-keyblock   --bg /path/to/video.ext   --no-bg
 ```
 
-- `--escape-code`  Set the adult exit code (default: `GROWNUP`).
-- `--no-sound`     Mute click/bleep.
-- `--windowed`     Debug in a window (no system grabs).
-- `--allow-alt`    Don’t block Alt-based combos.
-- `--allow-super`  Don’t block Super/Win.
-- `--no-gnome-keyblock`  Skip GNOME shortcut unbinding (Linux).
-- `--nuclear`      **Linux/GNOME/X11:** temporarily blank most GNOME keybindings while running, restore on exit.
-- `--no-win-keyblock`   Skip the Windows keyboard hook.
+- `--escape-code`    Set the adult exit code (default: `GROWNUP`).
+- `--no-sound`       Mute sounds.
+- `--windowed`       Debug in a window (no system grabs).
+- `--allow-alt`      Don’t block Alt-based combos.
+- `--allow-super`    Don’t block Super/Win combos.
+- `--no-gnome-keyblock`  Skip GNOME shortcut changes (Linux/X11).
+- `--no-nuclear`     Disable the GNOME “nuclear” sweep (default is **on**).
+- `--no-win-keyblock`    Skip the Windows keyboard hook.
+- `--bg PATH`        Use a specific background video; otherwise the app scans `assets/background/` and picks the first supported file.
+- `--no-bg`          Disable background animation/video entirely.
 
 ### Adult-only exit sequence
 Hold **Left Shift** + **Right Shift**, press **F12**, type your secret (default `GROWNUP`), press **Enter**.

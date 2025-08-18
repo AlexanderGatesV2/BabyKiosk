@@ -12,7 +12,7 @@ Primary goals
 Important platform notes
 ------------------------
 - Strong lock is supported on **X11** using X keyboard/pointer grabs
-  (Alt+Tab, Super, etc. are captured by this window).
+  (Alt+Tab, Super, etc., are captured by this window).
 - On **Wayland**, global grabs are intentionally restricted by design; this app
   will still run, but the compositor may handle system shortcuts. For a
   near-kiosk experience on Wayland, run inside a kiosk compositor such as
@@ -23,7 +23,7 @@ Important platform notes
 
 Dependencies
 ------------
-    pip3 install pygame python-xlib
+    pip3 install pygame python-xlib imageio
 # Emoji images (cross-platform): place Twemoji PNGs in ./assets/72x72 next to this script
 
 Run
@@ -35,6 +35,7 @@ Options
     python3 baby_kiosk.py --escape-code=MYSECRET --no-sound --windowed
 
 """
+
 from __future__ import annotations
 import pygame
 import os, time, math, random
@@ -46,14 +47,10 @@ import random
 import sys
 import time
 from dataclasses import dataclass
-
-try:
-    import cv2  # optional (pip install opencv-python)
-    import numpy as np
-except Exception:
-    cv2 = None
-    np = None
-
+import cv2
+import numpy as np
+import imageio.v2 as imageio  # fallback decoder
+import imageio_ffmpeg
 
 # --------------------------- Emoji support --------------------------- #
 # A cheerful set of emojis to use when a non‑alphanumeric key is pressed.
@@ -108,6 +105,40 @@ except Exception:
     _X11_OK = False
 
 # --------------------------- Visual helpers --------------------------- #
+
+# --- helpers ---------------------------------------------------------------
+def _resolve_bg_path(args, script_dir):
+    """Return a valid background video path or None. Never returns a bool.
+    If --bg is provided and exists, use it. Otherwise scan assets/background/
+    for the first supported file."""
+    if getattr(args, 'no_bg', False):
+        return None
+
+    # explicit path beats discovery
+    p = getattr(args, 'bg', None)
+    if isinstance(p, (str, bytes, os.PathLike)):
+        p_str = os.fspath(p)
+        if p_str.strip() and os.path.exists(p_str):
+            return p_str
+
+    # auto-discovery
+    bg_dir = os.path.join(script_dir, 'assets', 'background')
+    if os.path.isdir(bg_dir):
+        exts = ('.mp4', '.mov', '.m4v', '.avi', '.mkv', '.webm', '.gif')
+        candidates = []
+        try:
+            for name in sorted(os.listdir(bg_dir)):
+                full = os.path.join(bg_dir, name)
+                if os.path.isfile(full) and name.lower().endswith(exts):
+                    candidates.append(full)
+        except Exception:
+            pass
+        if candidates:
+            return candidates[0]
+
+    return None
+
+
 @dataclass
 class Particle:
     x: float
@@ -116,18 +147,18 @@ class Particle:
     vy: float
     r: float
     life: float
-    color: tuple
+    color: tuple[int, int, int]
 
-    def update(self, dt: float):
+    def update(self, dt: float) -> None:
         self.x += self.vx * dt
         self.y += self.vy * dt
-        self.vy += 50 * dt  # gentle gravity
+        self.vy += 50.0 * dt  # gentle gravity
         self.life -= dt
-        # shrink a bit over time
-        self.r = max(0, self.r - 10 * dt)
+        # shrink a bit over time (keep float type consistent)
+        self.r = max(0.0, self.r - 10.0 * dt)
 
-    def draw(self, surf: pygame.Surface):
-        if self.life <= 0 or self.r <= 0:
+    def draw(self, surf: "pygame.Surface") -> None:
+        if self.life <= 0.0 or self.r <= 0.0:
             return
         pygame.draw.circle(surf, self.color, (int(self.x), int(self.y)), int(self.r))
 
@@ -185,12 +216,15 @@ class FloatingGlyph:
         surf.blit(s, (int(self.x), int(self.y)))
 
 class BackgroundBase:
+    def __init__(self): self.status = ""
     def resize(self, wh): pass
     def update(self, dt): pass
     def draw(self, surf): pass
 
 class BackgroundVideo(BackgroundBase):
+    """OpenCV first; falls back to imageio if cv2 can't open the file."""
     def __init__(self, path, wh):
+        super().__init__()
         self.path = path
         self.w, self.h = wh
         self.fps = 30.0
@@ -198,66 +232,145 @@ class BackgroundVideo(BackgroundBase):
         self.frame = None
         self.ok = False
         self.cap = None
-        if cv2 is not None and os.path.exists(path):
-            self.cap = cv2.VideoCapture(path)
-            if self.cap and self.cap.isOpened():
+        self.reader = None
+        self._use_imageio = False
+
+        if cv2 is not None:
+            cap = cv2.VideoCapture(path)
+            if not isinstance(path, (str, bytes, os.PathLike)):
+                self.ok = False
+                self.status = f'bg:invalid path type {type(path).__name__}'
+                return
+            if cap is not None and cap.isOpened():
+                self.cap = cap
                 fps = self.cap.get(cv2.CAP_PROP_FPS)
-                self.fps = fps if fps and fps > 1 else 30.0
+                if fps and fps > 1:
+                    self.fps = float(fps)
                 self.ok = True
+                self.status = f"bg:opencv@{self.fps:.1f}fps"
+        if not self.ok and imageio is not None:
+            try:
+                self.reader = imageio.get_reader(path)
+                meta = self.reader.get_meta_data()
+                fps = meta.get("fps", 30.0)
+                self.fps = float(fps) if fps and fps > 1 else 30.0
+                self._use_imageio = True
+                self.ok = True
+                self.status = f"bg:imageio@{self.fps:.1f}fps"
+            except Exception as e:
+                self.status = f"bg:fail ({e})"
+                self.ok = False
 
     def resize(self, wh):
         self.w, self.h = wh
-        # force next update to scale new frame
-        self.last = 0
+        self.last = 0.0  # force refresh
 
-    def _next_frame(self):
-        # loop the video
-        if not self.cap: return None
+    def _next_cv2(self):
         ret, bgr = self.cap.read()
         if not ret:
+            # loop
             try:
                 self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                 ret, bgr = self.cap.read()
             except Exception:
                 return None
-        if not ret: return None
+        if not ret:
+            return None
         rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
         if (rgb.shape[1], rgb.shape[0]) != (self.w, self.h):
             rgb = cv2.resize(rgb, (self.w, self.h), interpolation=cv2.INTER_LINEAR)
-        # pygame surface from numpy
         arr = np.ascontiguousarray(rgb)
         surf = pygame.image.frombuffer(arr.data, (self.w, self.h), "RGB")
         return surf.convert()
 
-    def update(self, dt):
-        if not self.ok: return
-        now = time.time()
-        need = (now - self.last) >= (1.0 / max(10.0, self.fps))
-        if self.frame is None or need:
+    def _next_imageio(self):
+        """Read next frame via imageio, normalize to RGB np.uint8, scale to (w,h),
+        and return a pygame.Surface. Returns None on failure."""
+        try:
+            frame = self.reader.get_next_data()
+        except Exception:
+            # loop/reopen
             try:
-                fr = self._next_frame()
-                if fr is not None:
-                    self.frame = fr
-                    self.last = now
+                self.reader.close()
+                self.reader = imageio.get_reader(self.path)
+                frame = self.reader.get_next_data()
             except Exception:
+                return None
+
+        if frame is None:
+            return None
+
+        # Some plugins may yield dicts (rare); try common keys
+        if isinstance(frame, dict):
+            if 'image' in frame:
+                frame = frame['image']
+            elif 'data' in frame:
+                frame = frame['data']
+            else:
+                return None
+
+        # Ensure numpy array
+        if not isinstance(frame, np.ndarray):
+            try:
+                frame = np.asarray(frame)
+            except Exception:
+                return None
+
+        # Normalize to RGB HxWx3
+        if frame.ndim == 2:  # grayscale
+            frame = np.stack([frame] * 3, axis=-1)
+        elif frame.ndim == 3 and frame.shape[2] == 4:  # RGBA -> RGB
+            frame = frame[:, :, :3]
+        elif frame.ndim != 3 or frame.shape[2] != 3:
+            return None
+
+        # Type to uint8
+        if frame.dtype != np.uint8:
+            frame = np.clip(frame, 0, 255).astype(np.uint8)
+
+        # Resize to window
+        if (frame.shape[1], frame.shape[0]) != (self.w, self.h):
+            if cv2 is not None:
+                frame = cv2.resize(frame, (self.w, self.h), interpolation=cv2.INTER_LINEAR)
+            else:
+                # Fallback resize without OpenCV
+                surf = pygame.image.frombuffer(frame.tobytes(), (frame.shape[1], frame.shape[0]), "RGB").convert()
+                return pygame.transform.smoothscale(surf, (self.w, self.h))
+
+        # Create surface from bytes (width, height)
+        surf = pygame.image.frombuffer(frame.tobytes(), (frame.shape[1], frame.shape[0]), "RGB")
+        return surf.convert()
+
+    def update(self, dt):
+        if not self.ok:
+            return
+        now = time.time()
+        if self.frame is None or (now - self.last) >= 1.0 / max(10.0, self.fps):
+            fr = self._next_imageio() if self._use_imageio else self._next_cv2()
+            if fr is not None:
+                self.frame = fr
+                self.last = now
+            else:
                 self.ok = False
+                self.status = "bg:stopped"
 
     def draw(self, surf):
         if self.frame is not None:
             surf.blit(self.frame, (0, 0))
 
 class BackgroundWaves(BackgroundBase):
-    """GPU-cheap fallback: animated radial gradient waves."""
+    """Lightweight animated gradient fallback."""
     def __init__(self, wh):
+        super().__init__()
         self.w, self.h = wh
         self.t = 0.0
         self.canvas = pygame.Surface(wh).convert()
+        self.status = "bg:waves"
     def resize(self, wh):
         self.w, self.h = wh
         self.canvas = pygame.Surface(wh).convert()
     def update(self, dt):
         self.t += dt
-        # animate a soft two-color gradient
         for y in range(0, self.h, 8):
             c = int((math.sin(self.t*0.6 + y*0.02) * 0.5 + 0.5) * 60) + 30
             pygame.draw.rect(self.canvas, (10, 10, 20 + c), (0, y, self.w, 8))
@@ -671,18 +784,14 @@ class BabyKiosk:
         
         # Background video discovery
         script_dir = os.path.dirname(os.path.abspath(__file__))
-        default_bg = os.path.join(script_dir, 'assets', 'background', 'stars.mp4')
-        bg_path = getattr(args, 'bg', None) or default_bg
-        
+        bg_path = _resolve_bg_path(args, script_dir)
+
         self.background = None
         if not getattr(args, 'no_bg', False):
-            if cv2 is not None and os.path.exists(bg_path):
+            if bg_path and (cv2 is not None or imageio is not None):
                 self.background = BackgroundVideo(bg_path, (self.w, self.h))
             else:
-                # graceful fallback if OpenCV missing or file not found
                 self.background = BackgroundWaves((self.w, self.h))
-
-
 
         # Try SDL2 keyboard grab (prevents Alt+Tab on some setups)
         self._sdl2_window = None
@@ -695,6 +804,7 @@ class BabyKiosk:
                 pass
         except Exception:
             pass
+
         pygame.display.set_caption("BabyKiosk")
         pygame.mouse.set_visible(False)
         pygame.event.set_grab(True)  # pointer grab via SDL as extra belt
@@ -723,7 +833,7 @@ class BabyKiosk:
             os.path.join(script_dir, 'assets', 'png'),
         ]
         self.twemoji_dir = next((d for d in candidates if os.path.isdir(d)), None)
-        self.emoji_cache: dict[str, pygame.Surface] = {}
+        self.emoji_cache: dict[tuple[str, int], pygame.Surface] = {}
 
         self.particles: list[Particle] = []
         self.glyphs: list[FloatingGlyph] = []
@@ -813,16 +923,20 @@ class BabyKiosk:
             buf.append(val)
         return pygame.mixer.Sound(buffer=buf)
 
-    def spawn_burst(self, x: int, y: int):
+    def spawn_burst(self, x: int, y: int) -> None:
         for _ in range(40):
-            ang = random.uniform(0, 2*math.pi)
+            ang = random.uniform(0, 2 * math.pi)
             spd = random.uniform(50, 350)
             vx = math.cos(ang) * spd
             vy = math.sin(ang) * spd
             r = random.uniform(3, 10)
-            color = [random.randint(60, 255) for _ in range(3)]
+            color: tuple[int, int, int] = (
+                random.randint(60, 255),
+                random.randint(60, 255),
+                random.randint(60, 255),
+            )
             life = random.uniform(0.6, 1.6)
-            self.particles.append(Particle(x, y, vx, vy, r, life, tuple(color)))
+            self.particles.append(Particle(x, y, vx, vy, r, life, color))
         if len(self.particles) > self.max_particles:
             self.particles = self.particles[-self.max_particles:]
 
@@ -835,22 +949,17 @@ class BabyKiosk:
         fallback_font: pygame.font.Font | None = None,
         image: pygame.Surface | None = None,
     ):
-        color = [random.randint(100, 255) for _ in range(3)]
+        color: tuple[int, int, int] = (
+            random.randint(100, 255),
+            random.randint(100, 255),
+            random.randint(100, 255),
+        )
         vx = random.uniform(-80, 80)
         vy = random.uniform(-30, 30)
         life = random.uniform(0.8, 1.6)
-    
-        self.glyphs.append(
-            FloatingGlyph(
-                text, x, y, vx, vy, life,
-                tuple(color),
-                font or self.mid_font,
-                fallback_font or self.mid_font,
-                image,
-            )
-        )
-    
-        # cap list size to avoid overload
+        self.glyphs.append(FloatingGlyph(
+            text, x, y, vx, vy, life, color, font or self.mid_font, fallback_font or self.mid_font, image
+        ))
         if len(self.glyphs) > self.max_glyphs:
             self.glyphs = self.glyphs[-self.max_glyphs:]
 
@@ -875,6 +984,7 @@ class BabyKiosk:
             rect = s.get_rect(center=(self.w//2, y))
             self.screen.blit(s, rect)
             y += 70
+
     def _refresh_fonts(self, force: bool = False):
         # Recompute font sizes based on current resolution (bigger letters/numbers)
         if not force and (self.w, self.h) == getattr(self, '_last_size', None):
@@ -916,44 +1026,33 @@ class BabyKiosk:
             cps.append(f"{cp:x}")
         return '-'.join(cps)
 
-    def _twemoji_surface(self, s: str, px: int) -> pygame.Surface | None:
-        # Load and cache a Twemoji PNG for the given emoji, scaled to px
-        if not getattr(self, 'twemoji_dir', None):
+    def _twemoji_surface(self, s: str, px: int) -> "pygame.Surface | None":
+        """Load a Twemoji PNG for the given emoji, scaled to px. Uses self.twemoji_dir."""
+        # Ensure we have an assets dir configured
+        base = getattr(self, "twemoji_dir", None)
+        if not base:
             return None
+
+        # Cache hit?
         key = (s, px)
-        if key in self.emoji_cache:
-            return self.emoji_cache[key]
+        cached = self.emoji_cache.get(key)
+        if cached is not None:
+            return cached
+
+        # Map emoji → filename like "1f389.png" (VS16 dropped by _emoji_to_twemoji_name)
         name = self._emoji_to_twemoji_name(s)
-        dirs = [self.twemoji_dir, os.path.join(self.twemoji_dir, '72x72'), os.path.join(self.twemoji_dir, 'png')]
-        path = None
-        for d in dirs:
-            cand = os.path.join(d, f"{name}.png")
-            if os.path.exists(cand):
-                path = cand
-                break
+        candidates = [
+            os.path.join(base, f"{name}.png"),
+            os.path.join(base, "72x72", f"{name}.png"),
+            os.path.join(base, "png", f"{name}.png"),
+        ]
+
+        # Try first existing path
+        path = next((p for p in candidates if os.path.exists(p)), None)
         if not path:
             return None
-        try:
-            img = pygame.image.load(path).convert_alpha()
-            if px and (img.get_width() != px or img.get_height() != px):
-                img = pygame.transform.smoothscale(img, (px, px))
-            self.emoji_cache[key] = img
-            return img
-        except Exception:
-            return None
-        key = (s, px)
-        if key in self.emoji_cache:
-            return self.emoji_cache[key]
-        name = self._emoji_to_twemoji_name(s)
-        dirs = [self.args.twemoji_dir, os.path.join(self.args.twemoji_dir, '72x72'), os.path.join(self.args.twemoji_dir, 'png')]
-        path = None
-        for d in dirs:
-            cand = os.path.join(d, f"{name}.png")
-            if os.path.exists(cand):
-                path = cand
-                break
-        if not path:
-            return None
+
+        # Load + scale
         try:
             img = pygame.image.load(path).convert_alpha()
             if px and (img.get_width() != px or img.get_height() != px):
@@ -1153,6 +1252,8 @@ class BabyKiosk:
             # draw
             if self.background:
                 self.background.draw(self.screen)
+            else:
+                self.screen.fill((0, 0, 0))  # only fill if no video bg
 
             # Draw background and content
             self.screen.fill((0, 0, 0))
@@ -1187,9 +1288,8 @@ def parse_args():
     ap.add_argument('--nuclear', dest='nuclear', action='store_true', default=True, help='Blank nearly all GNOME keybindings while the game runs (default: ON)')
     ap.add_argument('--no-nuclear', dest='nuclear', action='store_false', help='Disable the GNOME nuclear keybinding sweep for this run')
     ap.add_argument('--no-win-keyblock', action='store_true', help='(Windows) Do not install the low-level keyboard hook')
-    ap.add_argument('--bg', default=True, help='Path to a background video file (default: assets/background/stars.mp4)')
-    ap.add_argument('--no-bg', action='store_true', help='Disable background animation')
-
+    ap.add_argument('--bg', type=str, metavar='PATH', default=None, help='Path to a background video (default: assets/background)')
+    ap.add_argument('--no-bg', action='store_true', help='Disable background video/animation')
     return ap.parse_args()
 
 
