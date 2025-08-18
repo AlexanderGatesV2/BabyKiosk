@@ -35,7 +35,7 @@
 ## Project layout (assets)
 ```
 babykiosk/
-  baby_kiosk.py            # or baby_kiosk_v18.py
+  baby_kiosk.py            
   assets/
     72x72/                 # Twemoji PNGs (e.g., 1f389.png for 🎉)
     background/            # Put one or more videos here (the app picks one automatically)
